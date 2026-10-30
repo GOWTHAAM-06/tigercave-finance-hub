@@ -2,28 +2,57 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Check, Shield, Zap, Award } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const OpenAccount = () => {
   const [step, setStep] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     email: "",
+    password: "",
     phone: "",
     pan: "",
   });
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (step < 3) {
       setStep(step + 1);
-    } else {
-      console.log("Account creation submitted:", formData);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch("http://localhost:5000/api/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: formData.email, password: formData.password }),
+      });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || "Unable to create your account. Please try again.");
+      }
+
+      toast({ title: "Account created", description: "Your registration was successful." });
+      navigate("/login");
+    } catch (error) {
+      toast({
+        title: "Registration failed",
+        description: error instanceof Error ? error.message : "Unable to connect. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -138,6 +167,19 @@ const OpenAccount = () => {
                           required
                         />
                       </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="password">Password</Label>
+                        <Input
+                          id="password"
+                          name="password"
+                          type="password"
+                          placeholder="Create a password"
+                          value={formData.password}
+                          onChange={handleChange}
+                          className="h-12 bg-secondary border-border"
+                          required
+                        />
+                      </div>
                     </>
                   )}
 
@@ -193,8 +235,8 @@ const OpenAccount = () => {
                     </div>
                   )}
 
-                  <Button type="submit" variant="hero" size="lg" className="w-full">
-                    {step === 3 ? "Verify & Complete" : "Continue"}
+                  <Button type="submit" variant="hero" size="lg" className="w-full" disabled={isSubmitting}>
+                    {isSubmitting ? "Creating account..." : step === 3 ? "Verify & Complete" : "Continue"}
                   </Button>
 
                   {step > 1 && (
