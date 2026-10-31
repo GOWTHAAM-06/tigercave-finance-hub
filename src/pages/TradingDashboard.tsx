@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
 	Area,
-	AreaChart,
 	Bar,
-	BarChart,
 	CartesianGrid,
-	Customized,
+	ComposedChart,
+	Line,
 	ResponsiveContainer,
 	Tooltip,
 	XAxis,
@@ -24,15 +23,26 @@ import {
 	CircleHelp,
 	Clock3,
 	Layers3,
+	Maximize2,
 	Menu,
 	Plus,
 	Search,
+	SlidersHorizontal,
+	X,
 	Wallet,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+	DropdownMenu,
+	DropdownMenuCheckboxItem,
+	DropdownMenuContent,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
 	Select,
 	SelectContent,
@@ -84,12 +94,23 @@ type ChartCandle = {
 	close: number;
 	volume: number;
 	range: [number, number];
+	sma20: number | null;
+	sma50: number | null;
 };
 
 type ChartResponse = {
 	success: boolean;
 	error?: string;
+	absoluteChange: number;
+	percentageChange: number;
 	candles: Omit<ChartCandle, "range">[];
+};
+
+type ChartChangeSummary = {
+	symbol: string;
+	timeframe: ChartTimeframe;
+	absoluteChange: number;
+	percentageChange: number;
 };
 
 type Position = {
@@ -127,6 +148,21 @@ const inr = new Intl.NumberFormat("en-IN", {
 
 const formatSignedCurrency = (value: number) =>
 	`${value >= 0 ? "+" : "-"}${inr.format(Math.abs(value))}`;
+
+const addMovingAverages = (candles: Omit<ChartCandle, "sma20" | "sma50">[]): ChartCandle[] =>
+	candles.map((candle, index) => {
+		const averageClose = (period: number) => {
+			if (index + 1 < period) return null;
+			const periodCandles = candles.slice(index + 1 - period, index + 1);
+			return periodCandles.reduce((sum, item) => sum + item.close, 0) / period;
+		};
+
+		return {
+			...candle,
+			sma20: averageClose(20),
+			sma50: averageClose(50),
+		};
+	});
 
 const MarketTooltip = ({ active, payload, label }: TooltipProps<number | [number, number], string>) => {
 	const candle = payload?.[0]?.payload as ChartCandle | undefined;
@@ -193,9 +229,19 @@ const TradingDashboard = () => {
 	const [quoteError, setQuoteError] = useState<string | null>(null);
 	const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>("1d");
 	const [chartMode, setChartMode] = useState<ChartMode>("area");
+	const [isChartFullscreen, setIsChartFullscreen] = useState(false);
+	const closeChartButtonRef = useRef<HTMLButtonElement>(null);
 	const [chartData, setChartData] = useState<ChartCandle[]>([]);
+	const [chartChangeSummary, setChartChangeSummary] = useState<ChartChangeSummary | null>(null);
 	const [isLoadingChart, setIsLoadingChart] = useState(true);
 	const [chartError, setChartError] = useState<string | null>(null);
+	const [showSma20, setShowSma20] = useState(false);
+	const [showSma50, setShowSma50] = useState(false);
+	const [showVolume, setShowVolume] = useState(false);
+	const [visibleRange, setVisibleRange] = useState<[number, number] | null>(null);
+	const [isPanningChart, setIsPanningChart] = useState(false);
+	const chartPlotRef = useRef<HTMLDivElement>(null);
+	const chartPanRef = useRef<{ pointerId: number; startX: number; range: [number, number] } | null>(null);
 	const [userId] = useState(() => sessionStorage.getItem("userId"));
 	const [cashBalance, setCashBalance] = useState<number | null>(null);
 	const [marginUsed, setMarginUsed] = useState<number | null>(null);
@@ -205,6 +251,55 @@ const TradingDashboard = () => {
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const navigate = useNavigate();
 	const { toast } = useToast();
+
+	useEffect(() => {
+		const plot = chartPlotRef.current;
+		if (!plot || chartData.length < 2) return;
+
+		const handleWheel = (event: WheelEvent) => {
+			event.preventDefault();
+			const fullEnd = chartData.length - 1;
+			const [start, end] = visibleRange ?? [0, fullEnd];
+			const span = Math.max(1, end - start);
+			const nextSpan = Math.min(fullEnd, Math.max(1, span * (event.deltaY < 0 ? 0.8 : 1.25)));
+			const bounds = plot.getBoundingClientRect();
+			const pointerRatio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+			const anchor = start + span * pointerRatio;
+			let nextStart = anchor - (anchor - start) * (nextSpan / span);
+			let nextEnd = nextStart + nextSpan;
+
+			if (nextStart < 0) {
+				nextEnd -= nextStart;
+				nextStart = 0;
+			}
+			if (nextEnd > fullEnd) {
+				nextStart -= nextEnd - fullEnd;
+				nextEnd = fullEnd;
+			}
+			setVisibleRange([Math.max(0, nextStart), Math.min(fullEnd, nextEnd)]);
+		};
+
+		plot.addEventListener("wheel", handleWheel, { passive: false });
+		return () => plot.removeEventListener("wheel", handleWheel);
+	}, [chartData.length, visibleRange]);
+
+	useEffect(() => {
+		if (!isChartFullscreen) return;
+
+		const previousOverflow = document.body.style.overflow;
+		const handleKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") setIsChartFullscreen(false);
+		};
+
+		document.body.style.overflow = "hidden";
+		window.addEventListener("keydown", handleKeyDown);
+		closeChartButtonRef.current?.focus();
+
+		return () => {
+			document.body.style.overflow = previousOverflow;
+			window.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [isChartFullscreen]);
 
 	useEffect(() => {
 		let isCurrent = true;
@@ -260,6 +355,8 @@ const TradingDashboard = () => {
 		const controller = new AbortController();
 		let isCurrent = true;
 		setChartData([]);
+		setChartChangeSummary(null);
+		setVisibleRange(null);
 		setChartError(null);
 		setIsLoadingChart(true);
 
@@ -271,7 +368,13 @@ const TradingDashboard = () => {
 					{ signal: controller.signal },
 				);
 				const result: ChartResponse = await response.json();
-				if (!response.ok || !result.success || !Array.isArray(result.candles)) {
+				if (
+					!response.ok ||
+					!result.success ||
+					!Array.isArray(result.candles) ||
+					!Number.isFinite(result.absoluteChange) ||
+					!Number.isFinite(result.percentageChange)
+				) {
 					throw new Error(result.error || "Unable to load historical chart data.");
 				}
 
@@ -279,7 +382,15 @@ const TradingDashboard = () => {
 					...candle,
 					range: [candle.low, candle.high] as [number, number],
 				}));
-				if (isCurrent) setChartData(candles);
+				if (isCurrent) {
+					setChartData(addMovingAverages(candles));
+					setChartChangeSummary({
+						symbol: selectedSymbol,
+						timeframe: chartTimeframe,
+						absoluteChange: result.absoluteChange,
+						percentageChange: result.percentageChange,
+					});
+				}
 			} catch (error) {
 				if (isCurrent && !(error instanceof DOMException && error.name === "AbortError")) {
 					setChartError(error instanceof Error ? error.message : "Unable to load chart data.");
@@ -343,6 +454,20 @@ const TradingDashboard = () => {
 	}, [navigate, toast, userId]);
 
 	const selectedAsset = quotes.find((asset) => asset.symbol === selectedSymbol) ?? quotes[0] ?? null;
+	const fullRange: [number, number] = [0, Math.max(0, chartData.length - 1)];
+	const currentRange = visibleRange ?? fullRange;
+	const visibleCandles = chartData.slice(Math.floor(currentRange[0]), Math.ceil(currentRange[1]) + 1);
+	const priceLow = visibleCandles.length ? Math.min(...visibleCandles.map((candle) => candle.low)) : 0;
+	const priceHigh = visibleCandles.length ? Math.max(...visibleCandles.map((candle) => candle.high)) : 1;
+	const pricePadding = Math.max((priceHigh - priceLow) * 0.08, Math.abs(priceHigh) * 0.001);
+	const volumeAxisMaximum = Math.max(1, ...visibleCandles.map((candle) => candle.volume)) * 5;
+	const displayedChange = isLoadingChart
+		? selectedAsset
+			? { absoluteChange: selectedAsset.change, percentageChange: selectedAsset.changePercent }
+			: null
+		: chartChangeSummary?.symbol === selectedSymbol && chartChangeSummary.timeframe === chartTimeframe
+			? chartChangeSummary
+			: null;
 	const parsedQuantity = Number(quantity);
 	const validQuantity = Number.isFinite(parsedQuantity) && parsedQuantity > 0 ? parsedQuantity : 0;
 	const parsedLimitPrice = Number(limitPrice);
@@ -352,6 +477,35 @@ const TradingDashboard = () => {
 		(total, position) => total + (position.lastPrice - position.averagePrice) * position.quantity,
 		0,
 	);
+
+	const handleChartPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+		if (event.button !== 0 || chartData.length < 2) return;
+		const range = visibleRange ?? fullRange;
+		chartPanRef.current = { pointerId: event.pointerId, startX: event.clientX, range };
+		event.currentTarget.setPointerCapture(event.pointerId);
+		setIsPanningChart(true);
+	};
+
+	const handleChartPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+		const pan = chartPanRef.current;
+		if (!pan || pan.pointerId !== event.pointerId || chartData.length < 2) return;
+
+		const fullEnd = chartData.length - 1;
+		const span = pan.range[1] - pan.range[0];
+		const bounds = event.currentTarget.getBoundingClientRect();
+		const shift = -((event.clientX - pan.startX) / bounds.width) * span;
+		const start = Math.min(fullEnd - span, Math.max(0, pan.range[0] + shift));
+		setVisibleRange([start, start + span]);
+	};
+
+	const finishChartPan = (event: React.PointerEvent<HTMLDivElement>) => {
+		if (chartPanRef.current?.pointerId !== event.pointerId) return;
+		chartPanRef.current = null;
+		setIsPanningChart(false);
+		if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+			event.currentTarget.releasePointerCapture(event.pointerId);
+		}
+	};
 
 	const handleSearchTicker = async (event: React.FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
@@ -610,7 +764,21 @@ const TradingDashboard = () => {
 				</section>
 
 				<div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_350px]">
-					<Card id="market-chart" className="min-w-0 rounded-lg border-border bg-card shadow-none">
+					{isChartFullscreen && (
+						<div
+							aria-hidden="true"
+							className="fixed inset-0 z-[80] bg-black/85 backdrop-blur-sm"
+							onClick={() => setIsChartFullscreen(false)}
+						/>
+					)}
+					<Card
+						id="market-chart"
+						role={isChartFullscreen ? "dialog" : undefined}
+						aria-modal={isChartFullscreen || undefined}
+						aria-label={isChartFullscreen ? "Full-screen market chart" : undefined}
+						tabIndex={isChartFullscreen ? -1 : undefined}
+						className={`min-w-0 rounded-lg border-border bg-card shadow-none ${isChartFullscreen ? "fixed inset-0 z-[90] flex h-[100dvh] w-screen max-w-none flex-col overflow-y-auto rounded-none bg-background shadow-2xl" : ""}`}
+					>
 						<div className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-6">
 							<div>
 								<div className="mb-2 flex items-center gap-2">
@@ -623,9 +791,12 @@ const TradingDashboard = () => {
 								</div>
 								<div className="mt-2 flex items-center gap-2">
 									<span className="font-display text-2xl font-semibold tabular-nums">{selectedAsset ? inr.format(selectedAsset.price) : "—"}</span>
-									{selectedAsset && (
-										<span className={`text-xs font-medium ${selectedAsset.changePercent >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-											{selectedAsset.change >= 0 ? "+" : "-"}{inr.format(Math.abs(selectedAsset.change))} ({selectedAsset.changePercent >= 0 ? "+" : ""}{selectedAsset.changePercent.toFixed(2)}%)
+										{displayedChange && (
+										<span
+											title={isLoadingChart ? "Live quote change" : `${chartTimeframe.toUpperCase()} period change`}
+											className={`text-xs font-medium ${displayedChange.absoluteChange >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+										>
+											{displayedChange.absoluteChange >= 0 ? "+" : "-"}{inr.format(Math.abs(displayedChange.absoluteChange))} ({displayedChange.percentageChange >= 0 ? "+" : ""}{displayedChange.percentageChange.toFixed(2)}%)
 										</span>
 									)}
 								</div>
@@ -649,28 +820,56 @@ const TradingDashboard = () => {
 										</button>
 									))}
 								</div>
-								<div className="flex items-center gap-0.5 rounded-md border border-border bg-background p-1" role="group" aria-label="Chart type">
-									<button
-										type="button"
-										aria-label="Area chart"
-										title="Area chart"
-										aria-pressed={chartMode === "area"}
-										onClick={() => setChartMode("area")}
-										className={`rounded p-1.5 transition-colors ${chartMode === "area" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-									>
-										<Activity className="h-4 w-4" />
-									</button>
-									<button
-										type="button"
-										aria-label="Candlestick chart"
-										title="Candlestick chart"
-										aria-pressed={chartMode === "candles"}
-										onClick={() => setChartMode("candles")}
-										className={`rounded p-1.5 transition-colors ${chartMode === "candles" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-									>
-										<CandlestickChart className="h-4 w-4" />
-									</button>
-								</div>
+								<DropdownMenu>
+									<DropdownMenuTrigger asChild>
+										<Button variant="outline" size="sm" className="h-8 gap-1.5 px-2.5 text-xs">
+											<SlidersHorizontal className="h-3.5 w-3.5" />
+											Indicators
+										</Button>
+									</DropdownMenuTrigger>
+									<DropdownMenuContent align="end" className="w-48">
+										<DropdownMenuLabel>Technical indicators</DropdownMenuLabel>
+										<DropdownMenuSeparator />
+										<DropdownMenuCheckboxItem checked={showSma20} onCheckedChange={(checked) => setShowSma20(checked === true)}>SMA 20</DropdownMenuCheckboxItem>
+										<DropdownMenuCheckboxItem checked={showSma50} onCheckedChange={(checked) => setShowSma50(checked === true)}>SMA 50</DropdownMenuCheckboxItem>
+										<DropdownMenuCheckboxItem checked={showVolume} onCheckedChange={(checked) => setShowVolume(checked === true)}>Volume bars</DropdownMenuCheckboxItem>
+									</DropdownMenuContent>
+								</DropdownMenu>
+								<Select value={chartMode} onValueChange={(value: ChartMode) => setChartMode(value)}>
+									<SelectTrigger aria-label="Chart type" className="h-8 w-[150px] bg-background text-xs">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="candles">Candlesticks</SelectItem>
+										<SelectItem value="area">Area line</SelectItem>
+									</SelectContent>
+								</Select>
+								{isChartFullscreen ? (
+									<Button
+									ref={closeChartButtonRef}
+									type="button"
+									variant="hero"
+									size="sm"
+									onClick={() => setIsChartFullscreen(false)}
+									aria-label="Close full-screen chart"
+									className="h-9 shrink-0 px-3"
+								>
+									<X className="h-4 w-4" />
+									Close chart
+								</Button>
+								) : (
+									<Button
+									variant="outline"
+									size="icon"
+									type="button"
+									onClick={() => setIsChartFullscreen(true)}
+									aria-label="Expand chart to full screen"
+									title="Expand chart to full screen"
+									className="h-8 w-8"
+								>
+									<Maximize2 className="h-4 w-4" />
+								</Button>
+								)}
 								<Button variant="outline" size="sm" className="h-8 gap-1.5 px-2.5 text-xs">
 									<Plus className="h-3.5 w-3.5" />
 									Watchlist
@@ -678,15 +877,22 @@ const TradingDashboard = () => {
 							</div>
 						</div>
 
-						<div className="relative h-[290px] px-2 pb-2 pt-5 sm:h-[340px] sm:px-4">
+						<div
+											ref={chartPlotRef}
+							onPointerDown={handleChartPointerDown}
+							onPointerMove={handleChartPointerMove}
+							onPointerUp={finishChartPan}
+							onPointerCancel={finishChartPan}
+							onDoubleClick={() => setVisibleRange(null)}
+							className={`relative touch-none select-none px-2 pb-2 pt-5 sm:px-4 ${isPanningChart ? "cursor-grabbing" : "cursor-crosshair"} ${isChartFullscreen ? "min-h-0 flex-1" : "h-[290px] sm:h-[340px]"}`}
+						>
 							{chartData.length === 0 ? (
 								<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
 									{isLoadingChart ? "Loading historical prices..." : chartError || "No historical prices available."}
 								</div>
 							) : (
 								<ResponsiveContainer width="100%" height="100%">
-									{chartMode === "area" ? (
-										<AreaChart data={chartData} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
+									<ComposedChart data={visibleCandles} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
 											<defs>
 												<linearGradient id="marketArea" x1="0" y1="0" x2="0" y2="1">
 													<stop offset="0%" stopColor="hsl(32, 95%, 55%)" stopOpacity={0.28} />
@@ -695,19 +901,18 @@ const TradingDashboard = () => {
 											</defs>
 											<CartesianGrid stroke="hsl(222, 30%, 18%)" strokeDasharray="3 5" vertical={false} />
 											<XAxis dataKey="timestamp" tick={{ fill: "hsl(220, 15%, 55%)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={formatChartTime} minTickGap={24} />
-											<YAxis orientation="right" tick={{ fill: "hsl(220, 15%, 55%)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} domain={["dataMin - (dataMax - dataMin) * 0.12", "dataMax + (dataMax - dataMin) * 0.12"]} width={58} />
+											<YAxis yAxisId="price" orientation="right" tick={{ fill: "hsl(220, 15%, 55%)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} domain={[priceLow - pricePadding, priceHigh + pricePadding]} width={58} />
+											{showVolume && <YAxis yAxisId="volume" hide domain={[0, volumeAxisMaximum]} />}
 											<Tooltip content={<MarketTooltip />} cursor={{ stroke: "hsl(32, 95%, 55%)", strokeDasharray: "4 4" }} />
-											<Area type="monotone" dataKey="close" stroke="hsl(32, 95%, 55%)" strokeWidth={2} fill="url(#marketArea)" activeDot={{ r: 4, strokeWidth: 0, fill: "hsl(32, 95%, 55%)" }} isAnimationActive={false} />
-										</AreaChart>
-									) : (
-										<BarChart data={chartData} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
-											<CartesianGrid stroke="hsl(222, 30%, 18%)" strokeDasharray="3 5" vertical={false} />
-											<XAxis dataKey="timestamp" tick={{ fill: "hsl(220, 15%, 55%)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={formatChartTime} minTickGap={24} />
-											<YAxis orientation="right" tick={{ fill: "hsl(220, 15%, 55%)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} domain={[(dataMin: number) => Math.min(dataMin, ...chartData.map((candle) => candle.low)), (dataMax: number) => Math.max(dataMax, ...chartData.map((candle) => candle.high))]} width={58} />
-											<Tooltip content={<MarketTooltip />} cursor={{ stroke: "hsl(32, 30%, 28%)", strokeDasharray: "4 4" }} />
-											<Bar dataKey="range" shape={<CandlestickShape />} isAnimationActive={false} />
-										</BarChart>
-									)}
+											{showVolume && <Bar yAxisId="volume" dataKey="volume" fill="#64748b" fillOpacity={0.28} barSize={8} isAnimationActive={false} />}
+											{chartMode === "area" ? (
+												<Area yAxisId="price" type="monotone" dataKey="close" stroke="hsl(32, 95%, 55%)" strokeWidth={2} fill="url(#marketArea)" activeDot={{ r: 4, strokeWidth: 0, fill: "hsl(32, 95%, 55%)" }} isAnimationActive={false} />
+											) : (
+												<Bar yAxisId="price" dataKey="range" shape={<CandlestickShape />} isAnimationActive={false} />
+											)}
+											{showSma20 && <Line yAxisId="price" type="monotone" dataKey="sma20" stroke="#38bdf8" strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />}
+											{showSma50 && <Line yAxisId="price" type="monotone" dataKey="sma50" stroke="#fbbf24" strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />}
+										</ComposedChart>
 								</ResponsiveContainer>
 							)}
 						</div>
