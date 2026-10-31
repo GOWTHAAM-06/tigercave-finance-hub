@@ -30,8 +30,9 @@ const Login = () => {
         throw new Error(result.error || "Unable to log in. Please try again.");
       }
 
+      sessionStorage.setItem("userId", String(result.user.id));
       toast({ title: "Login successful", description: "Welcome back." });
-      navigate("/");
+      navigate("/trading-dashboard");
     } catch (error) {
       toast({
         title: "Login failed",

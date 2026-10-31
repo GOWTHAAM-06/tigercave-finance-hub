@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import {
 	Area,
 	AreaChart,
@@ -54,6 +54,24 @@ type Position = {
 	realizedPnl: number;
 };
 
+type PortfolioOrder = {
+	id: number;
+	symbol: string;
+	type: "BUY" | "SELL";
+	orderType: "MARKET" | "LIMIT";
+	quantity: number;
+	price: number;
+	timestamp: string;
+};
+
+type PortfolioResponse = {
+	success: boolean;
+	cashBalance: number;
+	marginUsed: number;
+	positions: Position[];
+	orders: PortfolioOrder[];
+};
+
 const marketTape: Asset[] = [
 	{ symbol: "NIFTY 50", name: "NSE", price: 24823.15, change: 142.8, changePercent: 0.58 },
 	{ symbol: "SENSEX", name: "BSE", price: 81308.12, change: 318.45, changePercent: 0.39 },
@@ -70,12 +88,6 @@ const instruments: Asset[] = [
 	{ symbol: "BTC / INR", name: "BITCOIN · INR", price: 5825410.5, change: 71426.2, changePercent: 1.24 },
 	{ symbol: "ETH / INR", name: "ETHEREUM · INR", price: 314208.25, change: -1964.5, changePercent: -0.62 },
 	{ symbol: "DIGITAL GOLD", name: "DIGITAL GOLD · 24K/g", price: 7482.0, change: 23.1, changePercent: 0.31 },
-];
-
-const initialPositions: Position[] = [
-	{ id: "reliance-1", symbol: "RELIANCE", quantity: 24, averagePrice: 1389.0, lastPrice: 1405.5, realizedPnl: 0 },
-	{ id: "bitcoin-1", symbol: "BTC / INR", quantity: 0.08, averagePrice: 5748000, lastPrice: 5825410.5, realizedPnl: 850 },
-	{ id: "gold-1", symbol: "DIGITAL GOLD", quantity: 12, averagePrice: 7380, lastPrice: 7482, realizedPnl: 0 },
 ];
 
 const inr = new Intl.NumberFormat("en-IN", {
@@ -119,8 +131,61 @@ const TradingDashboard = () => {
 	const [orderType, setOrderType] = useState<"market" | "limit">("market");
 	const [quantity, setQuantity] = useState("1");
 	const [limitPrice, setLimitPrice] = useState("");
-	const [positions, setPositions] = useState(initialPositions);
+	const [userId] = useState(() => sessionStorage.getItem("userId"));
+	const [cashBalance, setCashBalance] = useState<number | null>(null);
+	const [marginUsed, setMarginUsed] = useState<number | null>(null);
+	const [positions, setPositions] = useState<Position[]>([]);
+	const [orders, setOrders] = useState<PortfolioOrder[]>([]);
+	const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
+	const [isSubmitting, setIsSubmitting] = useState(false);
+	const navigate = useNavigate();
 	const { toast } = useToast();
+
+	useEffect(() => {
+		if (!userId) {
+			setIsLoadingPortfolio(false);
+			toast({
+				title: "Sign in required",
+				description: "Log in to view your portfolio and place orders.",
+				variant: "destructive",
+			});
+			navigate("/login");
+			return;
+		}
+
+		let isCurrent = true;
+		const loadPortfolio = async () => {
+			try {
+				const response = await fetch(`http://localhost:5000/api/portfolio/${encodeURIComponent(userId)}`);
+				const result: PortfolioResponse & { error?: string } = await response.json();
+				if (!response.ok || !result.success) {
+					throw new Error(result.error || "Unable to load your portfolio.");
+				}
+
+				if (isCurrent) {
+					setCashBalance(Number(result.cashBalance));
+					setMarginUsed(Number(result.marginUsed));
+					setPositions(result.positions);
+					setOrders(result.orders);
+				}
+			} catch (error) {
+				if (isCurrent) {
+					toast({
+						title: "Portfolio unavailable",
+						description: error instanceof Error ? error.message : "Unable to connect to the trading server.",
+						variant: "destructive",
+					});
+				}
+			} finally {
+				if (isCurrent) setIsLoadingPortfolio(false);
+			}
+		};
+
+		void loadPortfolio();
+		return () => {
+			isCurrent = false;
+		};
+	}, [navigate, toast, userId]);
 
 	const selectedAsset = instruments.find((asset) => asset.symbol === selectedSymbol) ?? instruments[0];
 	const chartData = makeTrend(selectedAsset.price, selectedAsset.changePercent, selectedAsset.symbol);
@@ -134,8 +199,12 @@ const TradingDashboard = () => {
 		0,
 	);
 
-	const handlePlaceOrder = (event: React.FormEvent<HTMLFormElement>) => {
+	const handlePlaceOrder = async (event: React.FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
+		if (!userId) {
+			navigate("/login");
+			return;
+		}
 		if (!validQuantity) {
 			toast({
 				title: "Enter a valid quantity",
@@ -153,22 +222,43 @@ const TradingDashboard = () => {
 			return;
 		}
 
-		const signedQuantity = side === "buy" ? validQuantity : -validQuantity;
-		setPositions((current) => [
-			{
-				id: `${Date.now()}-${current.length}`,
-				symbol: selectedAsset.symbol,
-				quantity: signedQuantity,
-				averagePrice: executionPrice,
-				lastPrice: selectedAsset.price,
-				realizedPnl: 0,
-			},
-			...current,
-		]);
-		toast({
-			title: `${side === "buy" ? "Buy" : "Sell"} order placed`,
-			description: `${validQuantity} ${selectedAsset.symbol} at ${inr.format(executionPrice)}. Demo order added to positions.`,
-		});
+		setIsSubmitting(true);
+		try {
+			const response = await fetch("http://localhost:5000/api/orders", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					userId: Number(userId),
+					symbol: selectedAsset.symbol,
+					type: side,
+					orderType,
+					quantity: validQuantity,
+					price: executionPrice,
+				}),
+			});
+			const result: PortfolioResponse & { error?: string } = await response.json();
+			if (!response.ok || !result.success) {
+				throw new Error(result.error || "Unable to execute order.");
+			}
+
+			setCashBalance(Number(result.cashBalance));
+			setMarginUsed(Number(result.marginUsed));
+			setPositions(result.positions);
+			setOrders(result.orders);
+			setQuantity("1");
+			toast({
+				title: `${side === "buy" ? "Buy" : "Sell"} order placed`,
+				description: `${validQuantity} ${selectedAsset.symbol} at ${inr.format(executionPrice)}. Portfolio updated.`,
+			});
+		} catch (error) {
+			toast({
+				title: "Order failed",
+				description: error instanceof Error ? error.message : "Unable to connect to the trading server.",
+				variant: "destructive",
+			});
+		} finally {
+			setIsSubmitting(false);
+		}
 	};
 
 	const tapeItems = [...marketTape, ...marketTape];
@@ -266,27 +356,27 @@ const TradingDashboard = () => {
 				<section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="Account summary">
 					<Card className="rounded-lg border-border bg-card p-4 shadow-none">
 						<div className="flex items-center justify-between text-xs text-muted-foreground">
-							<span>Portfolio value</span>
-							<Layers3 className="h-4 w-4" />
-						</div>
-						<p className="mt-2 font-display text-xl font-semibold tabular-nums">{inr.format(1284750.8)}</p>
-						<p className="mt-1 text-xs text-muted-foreground">Across 3 active positions</p>
-					</Card>
-					<Card className="rounded-lg border-border bg-card p-4 shadow-none">
-						<div className="flex items-center justify-between text-xs text-muted-foreground">
-							<span>Today's P&amp;L</span>
-							<ArrowUpRight className="h-4 w-4 text-emerald-400" />
-						</div>
-						<p className="mt-2 font-display text-xl font-semibold tabular-nums text-emerald-400">+{inr.format(totalUnrealizedPnl)}</p>
-						<p className="mt-1 text-xs text-emerald-400">+1.84% today</p>
-					</Card>
-					<Card className="rounded-lg border-border bg-card p-4 shadow-none">
-						<div className="flex items-center justify-between text-xs text-muted-foreground">
-							<span>Available funds</span>
+							<span>Cash balance</span>
 							<Wallet className="h-4 w-4" />
 						</div>
-						<p className="mt-2 font-display text-xl font-semibold tabular-nums">{inr.format(845620.0)}</p>
-						<p className="mt-1 text-xs text-muted-foreground">Buying power available</p>
+						<p className="mt-2 font-display text-xl font-semibold tabular-nums">{cashBalance === null ? (isLoadingPortfolio ? "Loading..." : "—") : inr.format(cashBalance)}</p>
+						<p className="mt-1 text-xs text-muted-foreground">{positions.length} active {positions.length === 1 ? "position" : "positions"}</p>
+					</Card>
+					<Card className="rounded-lg border-border bg-card p-4 shadow-none">
+						<div className="flex items-center justify-between text-xs text-muted-foreground">
+							<span>Margin used</span>
+							<Layers3 className="h-4 w-4" />
+						</div>
+						<p className="mt-2 font-display text-xl font-semibold tabular-nums">{marginUsed === null ? (isLoadingPortfolio ? "Loading..." : "—") : inr.format(marginUsed)}</p>
+						<p className="mt-1 text-xs text-muted-foreground">Cost basis of open positions</p>
+					</Card>
+					<Card className="rounded-lg border-border bg-card p-4 shadow-none">
+						<div className="flex items-center justify-between text-xs text-muted-foreground">
+							<span>Unrealized P&amp;L</span>
+							{totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-4 w-4 text-emerald-400" /> : <ArrowDownRight className="h-4 w-4 text-rose-400" />}
+						</div>
+						<p className={`mt-2 font-display text-xl font-semibold tabular-nums ${totalUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatSignedCurrency(totalUnrealizedPnl)}</p>
+						<p className="mt-1 text-xs text-muted-foreground">Based on most recent trade prices</p>
 					</Card>
 				</section>
 
@@ -473,14 +563,14 @@ const TradingDashboard = () => {
 									<span className="tabular-nums text-foreground">{validQuantity || "—"}</span>
 								</div>
 								<div className="flex items-center justify-between border-t border-border pt-3">
-									<span className="text-sm font-semibold">Margin required</span>
+									<span className="text-sm font-semibold">{side === "buy" ? "Margin required" : "Sale proceeds"}</span>
 									<span className="font-display text-base font-semibold tabular-nums">{inr.format(marginRequired)}</span>
 								</div>
-								<p className="text-[10px] leading-relaxed text-muted-foreground">Estimated notional value; fees and exchange margin rules are not included.</p>
+								<p className="text-[10px] leading-relaxed text-muted-foreground">Estimated notional value; buy value is deducted from cash and sell proceeds are credited.</p>
 							</div>
 
-							<Button type="submit" variant="hero" className={`h-11 w-full ${side === "sell" ? "bg-rose-500 text-white shadow-none hover:bg-rose-600 hover:shadow-none" : ""}`}>
-								{side === "buy" ? "Place buy order" : "Place sell order"}
+							<Button type="submit" variant="hero" disabled={isSubmitting || isLoadingPortfolio || cashBalance === null} className={`h-11 w-full ${side === "sell" ? "bg-rose-500 text-white shadow-none hover:bg-rose-600 hover:shadow-none" : ""}`}>
+								{isSubmitting ? "Submitting order..." : side === "buy" ? "Place buy order" : "Place sell order"}
 							</Button>
 						</form>
 					</Card>
@@ -510,8 +600,14 @@ const TradingDashboard = () => {
 									<th className="px-5 py-3 text-right font-medium sm:px-6">Unrealized P&amp;L</th>
 								</tr>
 							</thead>
-							<tbody>
-								{positions.map((position) => {
+								<tbody>
+									{positions.length === 0 ? (
+										<tr>
+											<td colSpan={6} className="px-5 py-10 text-center text-sm text-muted-foreground sm:px-6">
+												{isLoadingPortfolio ? "Loading positions..." : "No active positions yet."}
+											</td>
+										</tr>
+									) : positions.map((position) => {
 									const unrealizedPnl = (position.lastPrice - position.averagePrice) * position.quantity;
 									const positionAsset = instruments.find((asset) => asset.symbol === position.symbol);
 									const isCrypto = position.symbol.includes("INR");
@@ -536,13 +632,46 @@ const TradingDashboard = () => {
 											<td className={`px-5 py-4 text-right text-sm font-medium tabular-nums sm:px-6 ${unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatSignedCurrency(unrealizedPnl)}</td>
 										</tr>
 									);
-								})}
+									})}
 							</tbody>
 						</table>
 					</div>
 					<div className="flex items-center gap-2 border-t border-border px-5 py-3 text-[10px] text-muted-foreground sm:px-6">
 						<Check className="h-3.5 w-3.5 text-emerald-400" />
-						Positions and quotes are simulated for demonstration purposes.
+						Wallet and order history are stored by the trading server; market quotes remain simulated.
+					</div>
+				</Card>
+
+				<Card className="mt-5 overflow-hidden rounded-lg border-border bg-card shadow-none">
+					<div className="border-b border-border px-5 py-4 sm:px-6">
+						<h2 className="font-display text-base font-semibold">Order history</h2>
+						<p className="mt-1 text-xs text-muted-foreground">Most recent executed trades</p>
+					</div>
+					<div className="overflow-x-auto">
+						<table className="w-full min-w-[700px] border-collapse text-left">
+							<thead>
+								<tr className="border-b border-border text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+									<th className="px-5 py-3 font-medium sm:px-6">Time</th>
+									<th className="px-4 py-3 font-medium">Symbol</th>
+									<th className="px-4 py-3 font-medium">Side</th>
+									<th className="px-4 py-3 text-right font-medium">Qty</th>
+									<th className="px-5 py-3 text-right font-medium sm:px-6">Execution price</th>
+								</tr>
+							</thead>
+							<tbody>
+								{orders.length === 0 ? (
+									<tr><td colSpan={5} className="px-5 py-10 text-center text-sm text-muted-foreground sm:px-6">{isLoadingPortfolio ? "Loading order history..." : "No trades have been placed yet."}</td></tr>
+								) : orders.map((order) => (
+									<tr key={order.id} className="border-b border-border/70 last:border-0">
+										<td className="whitespace-nowrap px-5 py-3 text-xs text-muted-foreground sm:px-6">{new Date(order.timestamp).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</td>
+										<td className="px-4 py-3 text-sm font-medium">{order.symbol}</td>
+										<td className={`px-4 py-3 text-xs font-semibold ${order.type === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{order.type} · {order.orderType}</td>
+										<td className="px-4 py-3 text-right text-sm tabular-nums">{order.quantity}</td>
+										<td className="px-5 py-3 text-right text-sm tabular-nums sm:px-6">{inr.format(order.price)}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
 					</div>
 				</Card>
 

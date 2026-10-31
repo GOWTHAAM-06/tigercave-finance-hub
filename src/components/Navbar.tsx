@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
 
 const Navbar = () => {
   const navLinks = [
@@ -33,12 +34,21 @@ const Navbar = () => {
 
           {/* CTA Buttons */}
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" className="hidden sm:inline-flex">
-              Login
-            </Button>
-            <Button variant="hero" size="sm">
-              Open Account
-            </Button>
+            <Link to="/trading-dashboard">
+              <Button variant="outline" size="sm" className="hidden sm:inline-flex">
+                Trading
+              </Button>
+            </Link>
+            <Link to="/login">
+              <Button variant="ghost" size="sm" className="hidden sm:inline-flex">
+                Login
+              </Button>
+            </Link>
+            <Link to="/open-account">
+              <Button variant="hero" size="sm">
+                Open Account
+              </Button>
+            </Link>
           </div>
         </div>
       </div>
