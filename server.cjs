@@ -1,9 +1,18 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const YahooFinance = require('yahoo-finance2').default;
 require('dotenv').config();
 
 const app = express();
+const yahooFinance = new YahooFinance();
+const marketSymbols = [
+  { symbol: '^NSEI', name: 'Nifty 50' },
+  { symbol: '^BSESN', name: 'Sensex' },
+  { symbol: 'RELIANCE.NS', name: 'Reliance Industries' },
+  { symbol: 'TCS.NS', name: 'Tata Consultancy Services' },
+  { symbol: 'INFY.NS', name: 'Infosys' },
+];
 app.use(cors());
 app.use(express.json());
 
@@ -162,6 +171,151 @@ app.post('/api/login', async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/quotes', async (req, res) => {
+  try {
+    const quotes = await Promise.all(marketSymbols.map(async ({ symbol, name }) => {
+      const quote = await yahooFinance.quote(symbol);
+      const currentPrice = quote.regularMarketPrice;
+      const previousClose = quote.regularMarketPreviousClose;
+
+      if (
+        !Number.isFinite(currentPrice) ||
+        !Number.isFinite(previousClose) ||
+        previousClose === 0
+      ) {
+        throw new Error(`Missing market price data for ${symbol}`);
+      }
+
+      return {
+        symbol,
+        name,
+        currentPrice,
+        previousClose,
+        percentageChange: Number((((currentPrice - previousClose) / previousClose) * 100).toFixed(2)),
+      };
+    }));
+
+    res.json({ success: true, quotes });
+  } catch (err) {
+    console.error('Quote request failed:', err);
+    res.status(502).json({ success: false, error: 'Unable to fetch market quotes' });
+  }
+});
+
+app.get('/api/quote', (req, res) => {
+  res.status(404).json({ success: false, error: 'Ticker symbol is required' });
+});
+
+app.get('/api/quote/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.trim().toUpperCase();
+  if (!/^[A-Z0-9.&^=_-]{1,32}$/.test(symbol)) {
+    return res.status(404).json({ success: false, error: 'Ticker symbol not found' });
+  }
+
+  try {
+    const quote = await yahooFinance.quote(symbol);
+    const currentPrice = quote?.regularMarketPrice;
+    const previousClose = quote?.regularMarketPreviousClose;
+
+    if (
+      !Number.isFinite(currentPrice) ||
+      !Number.isFinite(previousClose) ||
+      previousClose === 0
+    ) {
+      return res.status(404).json({ success: false, error: 'Ticker symbol not found' });
+    }
+
+    res.json({
+      success: true,
+      quote: {
+        symbol,
+        currentPrice,
+        previousClose,
+        percentageChange: Number((((currentPrice - previousClose) / previousClose) * 100).toFixed(2)),
+      },
+    });
+  } catch (err) {
+    console.error(`Quote request failed for ${symbol}:`, err);
+    res.status(502).json({ success: false, error: 'Unable to fetch ticker quote' });
+  }
+});
+
+app.get('/api/chart', (req, res) => {
+  res.status(404).json({ success: false, error: 'Ticker symbol is required' });
+});
+
+app.get('/api/chart/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.trim().toUpperCase();
+  const interval = typeof req.query.interval === 'string' ? req.query.interval : '1d';
+  const chartRangeByInterval = {
+    '1d': { yahooInterval: '5m' },
+    '1w': { yahooInterval: '1d' },
+    '1m': { yahooInterval: '1d' },
+    '1y': { yahooInterval: '1wk' },
+  };
+
+  if (!/^[A-Z0-9.&^=_-]{1,32}$/.test(symbol)) {
+    return res.status(404).json({ success: false, error: 'Ticker symbol not found' });
+  }
+  if (!Object.hasOwn(chartRangeByInterval, interval)) {
+    return res.status(400).json({ success: false, error: 'Unsupported chart interval' });
+  }
+
+  try {
+    const period2 = new Date();
+    const period1 = new Date(period2);
+    if (interval === '1d') period1.setDate(period1.getDate() - 1);
+    if (interval === '1w') period1.setDate(period1.getDate() - 7);
+    if (interval === '1m') {
+      const monthDay = period1.getDate();
+      period1.setDate(1);
+      period1.setMonth(period1.getMonth() - 1);
+      const lastDayOfMonth = new Date(period1.getFullYear(), period1.getMonth() + 1, 0).getDate();
+      period1.setDate(Math.min(monthDay, lastDayOfMonth));
+    }
+    if (interval === '1y') period1.setFullYear(period1.getFullYear() - 1);
+
+    const result = await yahooFinance.chart(symbol, {
+      period1,
+      period2,
+      interval: chartRangeByInterval[interval].yahooInterval,
+    });
+    const candles = result.quotes
+      .filter((candle) =>
+        Number.isFinite(candle.open) &&
+        Number.isFinite(candle.high) &&
+        Number.isFinite(candle.low) &&
+        Number.isFinite(candle.close),
+      )
+      .map((candle) => ({
+        timestamp: candle.date.toISOString(),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: Number.isFinite(candle.volume) ? candle.volume : 0,
+      }));
+
+    if (candles.length === 0) {
+      return res.status(404).json({ success: false, error: 'No historical data found for ticker' });
+    }
+
+    const periodStartPrice = candles[0].open;
+    const periodEndPrice = candles[candles.length - 1].close;
+    const rawAbsoluteChange = periodEndPrice - periodStartPrice;
+    const absoluteChange = Number(rawAbsoluteChange.toFixed(2));
+    const percentageChange = Number(((rawAbsoluteChange / periodStartPrice) * 100).toFixed(2));
+
+    res.json({ success: true, symbol, interval, absoluteChange, percentageChange, candles });
+  } catch (err) {
+    if (/no data found|symbol may be delisted/i.test(err.message || '')) {
+      return res.status(404).json({ success: false, error: 'Ticker symbol not found' });
+    }
+    console.error(`Chart request failed for ${symbol}:`, err);
+    res.status(502).json({ success: false, error: 'Unable to fetch historical chart data' });
   }
 });
 
