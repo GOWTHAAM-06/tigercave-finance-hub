@@ -50,10 +50,16 @@ const initializeDatabase = async () => {
       symbol VARCHAR(32) NOT NULL,
       type VARCHAR(4) NOT NULL CHECK (type IN ('BUY', 'SELL')),
       order_type VARCHAR(8) NOT NULL CHECK (order_type IN ('MARKET', 'LIMIT')),
+      product_type VARCHAR(10) NOT NULL DEFAULT 'DELIVERY' CHECK (product_type IN ('INTRADAY', 'DELIVERY')),
       quantity NUMERIC(24, 8) NOT NULL CHECK (quantity > 0),
       price NUMERIC(24, 8) NOT NULL CHECK (price > 0),
       "timestamp" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS product_type VARCHAR(10) NOT NULL DEFAULT 'DELIVERY'
   `);
 
   await pool.query(`
@@ -79,7 +85,7 @@ const getPortfolio = async (database, userId) => {
   if (walletResult.rows.length === 0) return null;
 
   const orderResult = await database.query(
-    `SELECT id, symbol, type, order_type, quantity, price, "timestamp"
+    `SELECT id, symbol, type, order_type, product_type, quantity, price, "timestamp"
      FROM orders
      WHERE user_id = $1
      ORDER BY "timestamp" ASC, id ASC`,
@@ -91,14 +97,17 @@ const getPortfolio = async (database, userId) => {
     symbol: order.symbol,
     type: order.type,
     orderType: order.order_type,
+    productType: order.product_type,
     quantity: Number(order.quantity),
     price: Number(order.price),
     timestamp: order.timestamp,
   }));
 
   for (const order of orders) {
-    const position = positionsBySymbol.get(order.symbol) || {
+    const positionKey = `${order.productType}:${order.symbol}`;
+    const position = positionsBySymbol.get(positionKey) || {
       symbol: order.symbol,
+      productType: order.productType,
       quantity: 0,
       averagePrice: 0,
       lastPrice: order.price,
@@ -116,12 +125,12 @@ const getPortfolio = async (database, userId) => {
     }
 
     position.lastPrice = order.price;
-    positionsBySymbol.set(order.symbol, position);
+    positionsBySymbol.set(positionKey, position);
   }
 
   const positions = Array.from(positionsBySymbol.values())
     .filter((position) => position.quantity > 0.00000001)
-    .map((position) => ({ ...position, id: position.symbol }));
+    .map((position) => ({ ...position, id: `${position.productType}:${position.symbol}` }));
   const marginUsed = positions.reduce(
     (total, position) => total + position.quantity * position.averagePrice,
     0,
@@ -342,12 +351,16 @@ app.post('/api/orders', async (req, res) => {
   const symbol = typeof req.body.symbol === 'string' ? req.body.symbol.trim().toUpperCase() : '';
   const type = typeof req.body.type === 'string' ? req.body.type.toUpperCase() : '';
   const orderType = typeof req.body.orderType === 'string' ? req.body.orderType.toUpperCase() : '';
+  const productType = typeof req.body.productType === 'string'
+    ? req.body.productType.toUpperCase()
+    : 'DELIVERY';
   const quantity = Number(req.body.quantity);
   const price = Number(req.body.price);
 
   if (
     !Number.isSafeInteger(userId) || userId <= 0 || !symbol || symbol.length > 32 ||
     !['BUY', 'SELL'].includes(type) || !['MARKET', 'LIMIT'].includes(orderType) ||
+    !['INTRADAY', 'DELIVERY'].includes(productType) ||
     !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0
   ) {
     return res.status(400).json({ success: false, error: 'Invalid order details' });
@@ -388,8 +401,8 @@ app.post('/api/orders', async (req, res) => {
       const holdingsResult = await client.query(
         `SELECT COALESCE(SUM(CASE WHEN type = 'BUY' THEN quantity ELSE -quantity END), 0) AS quantity
          FROM orders
-         WHERE user_id = $1 AND symbol = $2`,
-        [userId, symbol],
+         WHERE user_id = $1 AND symbol = $2 AND product_type = $3`,
+        [userId, symbol, productType],
       );
       if (quantity > Number(holdingsResult.rows[0].quantity) + 0.00000001) {
         await client.query('ROLLBACK');
@@ -404,10 +417,10 @@ app.post('/api/orders', async (req, res) => {
       [balanceChange, userId],
     );
     const orderResult = await client.query(
-      `INSERT INTO orders (user_id, symbol, type, order_type, quantity, price)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, symbol, type, order_type, quantity, price, "timestamp"`,
-      [userId, symbol, type, orderType, quantity, price],
+      `INSERT INTO orders (user_id, symbol, type, order_type, product_type, quantity, price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, symbol, type, order_type, product_type, quantity, price, "timestamp"`,
+      [userId, symbol, type, orderType, productType, quantity, price],
     );
     const portfolio = await getPortfolio(client, userId);
     await client.query('COMMIT');
@@ -421,6 +434,7 @@ app.post('/api/orders', async (req, res) => {
         symbol: order.symbol,
         type: order.type,
         orderType: order.order_type,
+        productType: order.product_type,
         quantity: Number(order.quantity),
         price: Number(order.price),
         timestamp: order.timestamp,

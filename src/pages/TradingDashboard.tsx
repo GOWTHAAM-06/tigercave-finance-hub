@@ -19,7 +19,6 @@ import {
 	Bell,
 	CandlestickChart,
 	Check,
-	ChevronDown,
 	CircleHelp,
 	Clock3,
 	Layers3,
@@ -50,6 +49,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 
 type Asset = {
@@ -85,6 +85,7 @@ type SingleQuoteResponse = {
 
 type ChartTimeframe = "1d" | "1w" | "1m" | "1y";
 type ChartMode = "area" | "candles";
+type ProductType = "INTRADAY" | "DELIVERY";
 
 type ChartCandle = {
 	timestamp: string;
@@ -116,6 +117,7 @@ type ChartChangeSummary = {
 type Position = {
 	id: string;
 	symbol: string;
+	productType: ProductType;
 	quantity: number;
 	averagePrice: number;
 	lastPrice: number;
@@ -127,6 +129,7 @@ type PortfolioOrder = {
 	symbol: string;
 	type: "BUY" | "SELL";
 	orderType: "MARKET" | "LIMIT";
+	productType: ProductType;
 	quantity: number;
 	price: number;
 	timestamp: string;
@@ -220,6 +223,7 @@ const TradingDashboard = () => {
 	const [selectedSymbol, setSelectedSymbol] = useState("^NSEI");
 	const [side, setSide] = useState<"buy" | "sell">("buy");
 	const [orderType, setOrderType] = useState<"market" | "limit">("market");
+	const [productType, setProductType] = useState<ProductType>("DELIVERY");
 	const [quantity, setQuantity] = useState("1");
 	const [limitPrice, setLimitPrice] = useState("");
 	const [tickerSearch, setTickerSearch] = useState("");
@@ -249,6 +253,7 @@ const TradingDashboard = () => {
 	const [orders, setOrders] = useState<PortfolioOrder[]>([]);
 	const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
 	const [isSubmitting, setIsSubmitting] = useState(false);
+	const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
 	const navigate = useNavigate();
 	const { toast } = useToast();
 
@@ -477,6 +482,75 @@ const TradingDashboard = () => {
 		(total, position) => total + (position.lastPrice - position.averagePrice) * position.quantity,
 		0,
 	);
+	const holdings = positions.filter((position) => position.productType === "DELIVERY");
+
+	const renderPortfolioTable = (items: Position[], emptyMessage: string) => (
+		<div className="overflow-x-auto">
+			<table className="w-full min-w-[1180px] border-collapse text-left">
+				<thead>
+					<tr className="border-b border-border text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+						<th className="px-5 py-3 font-medium sm:px-6">Ticker</th>
+						<th className="px-4 py-3 font-medium">Product</th>
+						<th className="px-4 py-3 text-right font-medium">Quantity</th>
+						<th className="px-4 py-3 text-right font-medium">Average buy</th>
+						<th className="px-4 py-3 text-right font-medium">Current LTP</th>
+						<th className="px-4 py-3 text-right font-medium">Invested value</th>
+						<th className="px-4 py-3 text-right font-medium">Market value</th>
+						<th className="px-4 py-3 text-right font-medium">Total P&amp;L</th>
+						<th className="px-5 py-3 text-right font-medium sm:px-6">Action</th>
+					</tr>
+				</thead>
+				<tbody>
+					{items.length === 0 ? (
+						<tr>
+							<td colSpan={9} className="px-5 py-12 text-center text-sm text-muted-foreground sm:px-6">
+								{isLoadingPortfolio ? "Loading portfolio..." : emptyMessage}
+							</td>
+						</tr>
+					) : items.map((position) => {
+						const livePrice = quotes.find((quote) => quote.symbol === position.symbol)?.price;
+						const investedValue = position.quantity * position.averagePrice;
+						const marketValue = livePrice === undefined ? null : position.quantity * livePrice;
+						const totalPnl = livePrice === undefined
+							? null
+							: position.realizedPnl + (livePrice - position.averagePrice) * position.quantity;
+
+						return (
+							<tr key={position.id} className="border-b border-border/70 last:border-0 transition-colors hover:bg-secondary/40">
+								<td className="px-5 py-4 sm:px-6">
+									<div>
+										<p className="text-sm font-semibold">{position.symbol}</p>
+										<p className="mt-0.5 text-[10px] text-muted-foreground">{quotes.find((quote) => quote.symbol === position.symbol)?.name ?? "Market instrument"}</p>
+									</div>
+								</td>
+								<td className="px-4 py-4 text-xs text-muted-foreground">{position.productType === "INTRADAY" ? "Intraday" : "Delivery"}</td>
+								<td className="px-4 py-4 text-right text-sm tabular-nums">{position.quantity}</td>
+								<td className="px-4 py-4 text-right text-sm tabular-nums">{inr.format(position.averagePrice)}</td>
+								<td className="px-4 py-4 text-right text-sm tabular-nums">{livePrice === undefined ? "—" : inr.format(livePrice)}</td>
+								<td className="px-4 py-4 text-right text-sm tabular-nums">{inr.format(investedValue)}</td>
+								<td className="px-4 py-4 text-right text-sm tabular-nums">{marketValue === null ? "—" : inr.format(marketValue)}</td>
+								<td className={`px-4 py-4 text-right text-sm font-medium tabular-nums ${totalPnl === null ? "text-muted-foreground" : totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+									{totalPnl === null ? "—" : formatSignedCurrency(totalPnl)}
+								</td>
+								<td className="px-5 py-4 text-right sm:px-6">
+									<Button
+										variant="outline"
+										size="sm"
+										disabled={closingPositionId !== null || livePrice === undefined}
+										onClick={() => void handleExitPosition(position)}
+										aria-label={`Exit ${position.symbol} ${position.productType.toLowerCase()} position at market`}
+										className="h-8 whitespace-nowrap border-rose-500/30 px-3 text-xs text-rose-400 hover:border-rose-500/60 hover:bg-rose-500/10 hover:text-rose-300"
+									>
+										{closingPositionId === position.id ? "Exiting..." : "Exit / Sell"}
+									</Button>
+								</td>
+							</tr>
+						);
+					})}
+				</tbody>
+			</table>
+		</div>
+	);
 
 	const handleChartPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
 		if (event.button !== 0 || chartData.length < 2) return;
@@ -602,6 +676,7 @@ const TradingDashboard = () => {
 					symbol: selectedAsset.symbol,
 					type: side,
 					orderType,
+					productType,
 					quantity: validQuantity,
 					price: executionPrice,
 				}),
@@ -628,6 +703,61 @@ const TradingDashboard = () => {
 			});
 		} finally {
 			setIsSubmitting(false);
+		}
+	};
+
+	const handleExitPosition = async (position: Position) => {
+		if (!userId) {
+			navigate("/login");
+			return;
+		}
+
+		const liveAsset = quotes.find((asset) => asset.symbol === position.symbol);
+		if (!liveAsset) {
+			toast({
+				title: "Live quote unavailable",
+				description: `Refresh market data before exiting ${position.symbol}.`,
+				variant: "destructive",
+			});
+			return;
+		}
+
+		setClosingPositionId(position.id);
+		try {
+			const response = await fetch("http://localhost:5000/api/orders", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					userId: Number(userId),
+					symbol: position.symbol,
+					type: "SELL",
+					orderType: "MARKET",
+					productType: position.productType,
+					quantity: position.quantity,
+					price: liveAsset.price,
+				}),
+			});
+			const result: PortfolioResponse & { error?: string } = await response.json();
+			if (!response.ok || !result.success) {
+				throw new Error(result.error || "Unable to exit position.");
+			}
+
+			setCashBalance(Number(result.cashBalance));
+			setMarginUsed(Number(result.marginUsed));
+			setPositions(result.positions);
+			setOrders(result.orders);
+			toast({
+				title: "Position exited",
+				description: `${position.symbol} sold at ${inr.format(liveAsset.price)}. Wallet balance updated.`,
+			});
+		} catch (error) {
+			toast({
+				title: "Exit failed",
+				description: error instanceof Error ? error.message : "Unable to connect to the trading server.",
+				variant: "destructive",
+			});
+		} finally {
+			setClosingPositionId(null);
 		}
 	};
 
@@ -1010,6 +1140,16 @@ const TradingDashboard = () => {
 									</SelectContent>
 								</Select>
 							</div>
+							<div className="space-y-2">
+								<Label htmlFor="product-type" className="text-xs text-muted-foreground">Product type</Label>
+								<Select value={productType} onValueChange={(value: ProductType) => setProductType(value)}>
+									<SelectTrigger id="product-type" className="h-10 bg-background text-sm"><SelectValue /></SelectTrigger>
+									<SelectContent>
+										<SelectItem value="DELIVERY">Delivery · Holdings</SelectItem>
+										<SelectItem value="INTRADAY">Intraday · Positions</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
 
 							<div className="grid grid-cols-2 gap-3">
 								<div className="space-y-2">
@@ -1065,70 +1205,49 @@ const TradingDashboard = () => {
 					</Card>
 				</div>
 
-				<Card id="positions" className="mt-5 overflow-hidden rounded-lg border-border bg-card shadow-none">
-					<div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4 sm:px-6">
-						<div>
-							<p className="mt-1 text-xs text-muted-foreground">{positions.length} open {positions.length === 1 ? "position" : "positions"}</p>
+				<section id="positions" className="mt-5 scroll-mt-24">
+					<Tabs defaultValue="positions" className="w-full">
+						<div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+							<div>
+								<h2 className="font-display text-lg font-semibold">Portfolio &amp; positions</h2>
+								<p className="mt-1 text-xs text-muted-foreground">Live market values · persistent wallet</p>
+							</div>
+							<TabsList className="h-10 rounded-md border border-border bg-card p-1">
+								<TabsTrigger value="positions" className="rounded px-3 text-xs data-[state=active]:bg-secondary">
+									Positions <span className="ml-1 text-muted-foreground">{positions.length}</span>
+								</TabsTrigger>
+								<TabsTrigger value="holdings" className="rounded px-3 text-xs data-[state=active]:bg-secondary">
+									Holdings <span className="ml-1 text-muted-foreground">{holdings.length}</span>
+								</TabsTrigger>
+							</TabsList>
 						</div>
-						<div className="flex items-center gap-2 text-xs text-muted-foreground">
-							<span>Unrealized P&amp;L</span>
-							<span className={`font-semibold tabular-nums ${totalUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatSignedCurrency(totalUnrealizedPnl)}</span>
-							<ChevronDown className="h-4 w-4" />
-						</div>
-					</div>
-					<div className="overflow-x-auto">
-						<table className="w-full min-w-[840px] border-collapse text-left">
-							<thead>
-								<tr className="border-b border-border text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
-									<th className="px-5 py-3 font-medium sm:px-6">Symbol</th>
-									<th className="px-4 py-3 text-right font-medium">Qty</th>
-									<th className="px-4 py-3 text-right font-medium">Avg. price</th>
-									<th className="px-4 py-3 text-right font-medium">LTP</th>
-									<th className="px-4 py-3 text-right font-medium">Realized P&amp;L</th>
-									<th className="px-5 py-3 text-right font-medium sm:px-6">Unrealized P&amp;L</th>
-								</tr>
-							</thead>
-								<tbody>
-									{positions.length === 0 ? (
-										<tr>
-											<td colSpan={6} className="px-5 py-10 text-center text-sm text-muted-foreground sm:px-6">
-												{isLoadingPortfolio ? "Loading positions..." : "No active positions yet."}
-											</td>
-										</tr>
-									) : positions.map((position) => {
-									const unrealizedPnl = (position.lastPrice - position.averagePrice) * position.quantity;
-										const positionAsset = quotes.find((asset) => asset.symbol === position.symbol);
-									const isCrypto = position.symbol.includes("INR");
-
-									return (
-										<tr key={position.id} className="border-b border-border/70 last:border-0 transition-colors hover:bg-secondary/40">
-											<td className="px-5 py-4 sm:px-6">
-												<div className="flex items-center gap-3">
-													<span className={`flex h-8 w-8 items-center justify-center rounded-md text-[10px] font-bold ${isCrypto ? "bg-sky-500/10 text-sky-400" : "bg-primary/10 text-primary"}`}>
-														{isCrypto ? "₿" : position.symbol === "DIGITAL GOLD" ? "Au" : position.symbol.slice(0, 1)}
-													</span>
-													<div>
-														<p className="text-sm font-semibold">{position.symbol}</p>
-														<p className="text-[10px] text-muted-foreground">{positionAsset?.name ?? "Demo position"}</p>
-													</div>
-												</div>
-											</td>
-											<td className="px-4 py-4 text-right text-sm tabular-nums">{Math.abs(position.quantity)}</td>
-											<td className="px-4 py-4 text-right text-sm tabular-nums">{inr.format(position.averagePrice)}</td>
-											<td className="px-4 py-4 text-right text-sm tabular-nums">{inr.format(position.lastPrice)}</td>
-											<td className={`px-4 py-4 text-right text-sm tabular-nums ${position.realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatSignedCurrency(position.realizedPnl)}</td>
-											<td className={`px-5 py-4 text-right text-sm font-medium tabular-nums sm:px-6 ${unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatSignedCurrency(unrealizedPnl)}</td>
-										</tr>
-									);
-									})}
-							</tbody>
-						</table>
-					</div>
-					<div className="flex items-center gap-2 border-t border-border px-5 py-3 text-[10px] text-muted-foreground sm:px-6">
-						<Check className="h-3.5 w-3.5 text-emerald-400" />
-						Wallet and order history are stored by the trading server; market quotes are supplied by Yahoo Finance.
-					</div>
-				</Card>
+						<TabsContent value="positions" className="mt-0 focus-visible:outline-none">
+							<Card className="overflow-hidden rounded-lg border-border bg-card shadow-none">
+								<div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4 sm:px-6">
+									<div>
+										<h3 className="text-sm font-semibold">Open positions</h3>
+										<p className="mt-1 text-xs text-muted-foreground">Intraday and delivery trades · exit executes a market sell</p>
+									</div>
+									<span className={`text-xs font-semibold tabular-nums ${totalUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>Unrealized {formatSignedCurrency(totalUnrealizedPnl)}</span>
+								</div>
+								{renderPortfolioTable(positions, "No open positions yet. Place a trade from the order ticket.")}
+								<div className="flex items-center gap-2 border-t border-border px-5 py-3 text-[10px] text-muted-foreground sm:px-6">
+									<Check className="h-3.5 w-3.5 text-emerald-400" />
+									Wallet and executed orders are stored by the trading server; LTP uses live quote data.
+								</div>
+							</Card>
+						</TabsContent>
+						<TabsContent value="holdings" className="mt-0 focus-visible:outline-none">
+							<Card className="overflow-hidden rounded-lg border-border bg-card shadow-none">
+								<div className="border-b border-border px-5 py-4 sm:px-6">
+									<h3 className="text-sm font-semibold">Delivery holdings</h3>
+									<p className="mt-1 text-xs text-muted-foreground">Long-term delivery assets · sell to release cash to your wallet</p>
+								</div>
+								{renderPortfolioTable(holdings, "No delivery holdings yet. Select Delivery when placing an order.")}
+							</Card>
+						</TabsContent>
+					</Tabs>
+				</section>
 
 				<Card className="mt-5 overflow-hidden rounded-lg border-border bg-card shadow-none">
 					<div className="border-b border-border px-5 py-4 sm:px-6">
